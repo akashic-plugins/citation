@@ -93,6 +93,7 @@ class ProtocolTagCleanupModule:
 
 class CitationPlugin(Plugin):
     name = "citation"
+    version = "1.0.0"
 
     def prompt_render_modules(self) -> list[object]:
         return [CitationPromptModule()]
