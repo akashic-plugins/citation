@@ -92,6 +92,7 @@ class ProtocolTagCleanupModule:
 
 
 class CitationPlugin(Plugin):
+    api_version = 2
     name = "citation"
     version = "1.0.0"
 
