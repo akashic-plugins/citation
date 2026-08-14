@@ -5,11 +5,11 @@ import re
 from dataclasses import dataclass
 from typing import Any, cast
 
-from agent.lifecycle.composition import (
-    AFTER_REASONING_CLEANUP_EVENT,
-    AFTER_REASONING_PREPROCESS_EVENT,
-    PROMPT_RENDER_EVENT,
+from agent.turn_events.after_reasoning import (
+    AFTER_REASONING_BEFORE_EVENT_BUS,
+    AFTER_REASONING_BEFORE_PERSIST,
 )
+from agent.turn_events.prompt_render import PROMPT_RENDER_AFTER_EVENT_BUS
 from agent.lifecycle.types import AfterReasoningCtx, PromptRenderCtx
 from agent.plugin_composition import Context, ServiceKey
 from agent.plugins import Plugin
@@ -139,12 +139,12 @@ async def apply(ctx: Context, config: object) -> None:
 
     # 1. Register the three behaviorally equivalent lifecycle listeners.
     _ = config
-    await ctx.on(PROMPT_RENDER_EVENT, append_citation_protocol)
-    await ctx.on(AFTER_REASONING_PREPROCESS_EVENT, _persist_v3_citation)
-    await ctx.on(AFTER_REASONING_CLEANUP_EVENT, cleanup_protocol_tags)
+    _ = await ctx.on(PROMPT_RENDER_AFTER_EVENT_BUS, append_citation_protocol)
+    _ = await ctx.on(AFTER_REASONING_BEFORE_EVENT_BUS, _persist_v3_citation)
+    _ = await ctx.on(AFTER_REASONING_BEFORE_PERSIST, cleanup_protocol_tags)
 
     # 2. Publish last so dependents unload before citation listeners disappear.
-    await ctx.provide(CITATION_PROTOCOL_SERVICE, CitationProtocol())
+    _ = await ctx.provide(CITATION_PROTOCOL_SERVICE, CitationProtocol())
 
 
 class CitationPlugin(Plugin):

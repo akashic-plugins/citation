@@ -8,9 +8,9 @@
 
 | 接入方式 | 阶段 |
 |---|---|
-| v3 `PROMPT_RENDER_EVENT` | 注入引用协议文本 |
-| v3 `AFTER_REASONING_PREPROCESS_EVENT` | 提取 cited ID 到 `persist_assistant_metadata` |
-| v3 `AFTER_REASONING_CLEANUP_EVENT` | 清理残留协议标签 |
+| v3 `PROMPT_RENDER_AFTER_EVENT_BUS` | legacy Prompt 事件后注入引用协议文本 |
+| v3 `AFTER_REASONING_BEFORE_EVENT_BUS` | legacy AfterReasoning 事件前提取 cited ID |
+| v3 `AFTER_REASONING_BEFORE_PERSIST` | 持久化前清理残留协议标签 |
 
 插件通过模块命名导出 `api_version = 3` 与 `apply(ctx, config)` 注册这些 listener，并提供 `citation.protocol` Service 给依赖引用协议顺序的插件。旧 `CitationPlugin` 与 phase module 暂时保留，只用于迁移期行为等价验证；新 Core 不再从固定 PluginManager 列表装配 Citation。
 

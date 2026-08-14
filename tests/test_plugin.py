@@ -9,13 +9,13 @@ import pytest
 
 import plugin as citation_module
 from agent.core.response_parser import ResponseMetadata
-from agent.lifecycle.composition import (
-    AFTER_REASONING_CLEANUP_EVENT,
-    AFTER_REASONING_PREPROCESS_EVENT,
-    PROMPT_RENDER_EVENT,
+from agent.turn_events.after_reasoning import (
+    AFTER_REASONING_BEFORE_EVENT_BUS,
+    AFTER_REASONING_BEFORE_PERSIST,
 )
+from agent.turn_events.prompt_render import PROMPT_RENDER_AFTER_EVENT_BUS
 from agent.lifecycle.types import AfterReasoningCtx, PromptRenderCtx
-from agent.plugin_composition import CompositionRoot, PluginRuntime
+from agent.plugin_composition import CompositionRoot, Context, PluginRuntime
 from agent.plugins.composable import ComposablePlugin
 from agent.plugins.manager import PluginManager
 from bus.event_bus import EventBus
@@ -107,10 +107,10 @@ async def test_after_reasoning_modules_strip_and_persist() -> None:
 async def test_v3_named_exports_match_legacy_lifecycle_behavior(
     tmp_path: Path,
 ) -> None:
-    ComposablePlugin.from_module(citation_module)
+    _ = ComposablePlugin.from_module(citation_module)
     root = CompositionRoot("citation-parity")
 
-    async def mount(ctx) -> None:
+    async def mount(ctx: Context) -> None:
         await apply(ctx, object())
 
     _ = await root.mount(
@@ -125,7 +125,10 @@ async def test_v3_named_exports_match_legacy_lifecycle_behavior(
             config=object(),
         ),
     )
-    assert root.receipt().ready is True
+    receipt = root.receipt()
+    assert receipt.ready is True
+    assert receipt.writes == ()
+    assert receipt.external_effects == ()
     assert root.context.require(CITATION_PROTOCOL_SERVICE).version == 1
 
     legacy_prompt = _prompt_ctx()
@@ -133,7 +136,7 @@ async def test_v3_named_exports_match_legacy_lifecycle_behavior(
         SimpleNamespace(slots={"prompt:ctx": legacy_prompt})
     )
     v3_prompt = _prompt_ctx()
-    await root.context.serial(PROMPT_RENDER_EVENT, v3_prompt)
+    _ = await root.context.serial(PROMPT_RENDER_AFTER_EVENT_BUS, v3_prompt)
     assert v3_prompt.system_sections_bottom == legacy_prompt.system_sections_bottom
 
     reply = "答复正文\n§cited:[mem_1]§ <meme:shy>"
@@ -142,14 +145,16 @@ async def test_v3_named_exports_match_legacy_lifecycle_behavior(
     await CitationAfterReasoningModule().run(legacy_frame)
     await ProtocolTagCleanupModule().run(legacy_frame)
     v3_answer = _answer_ctx(reply)
-    await root.context.serial(AFTER_REASONING_PREPROCESS_EVENT, v3_answer)
-    await root.context.serial(AFTER_REASONING_CLEANUP_EVENT, v3_answer)
+    _ = await root.context.serial(AFTER_REASONING_BEFORE_EVENT_BUS, v3_answer)
+    _ = await root.context.serial(AFTER_REASONING_BEFORE_PERSIST, v3_answer)
 
     assert v3_answer.reply == legacy_answer.reply
     assert v3_answer.persist_assistant_metadata["cited_memory_ids"] == (
         legacy_frame.slots["persist:assistant:cited_memory_ids"]
     )
     await root.dispose()
+    assert root.receipt().services == ()
+    assert root.receipt().effects == ()
 
 
 @pytest.mark.asyncio
@@ -158,10 +163,16 @@ async def test_v3_plugin_loads_through_real_generation_manager(
 ) -> None:
     plugin_home = tmp_path / "plugins"
     plugin_home.mkdir()
-    shutil.copytree(
+    _ = shutil.copytree(
         Path(__file__).parents[1],
         plugin_home / "citation",
-        ignore=shutil.ignore_patterns(".git", ".pytest_cache", "__pycache__"),
+        ignore=shutil.ignore_patterns(
+            ".akashic-core",
+            ".git",
+            ".plugin-contracts",
+            ".pytest_cache",
+            "__pycache__",
+        ),
     )
     manager = PluginManager(
         plugin_dirs=[plugin_home],
@@ -180,8 +191,12 @@ async def test_v3_plugin_loads_through_real_generation_manager(
     assert snapshot.composition_topology is not None
     assert "citation.protocol" in snapshot.composition_topology.services
     assert snapshot.composition_topology.listeners == (
-        "serial:turn.prompt_render:citation",
-        "serial:turn.after_reasoning.preprocess:citation",
-        "serial:turn.after_reasoning.cleanup:citation",
+        "serial:turn.prompt_render.after_event_bus:citation",
+        "serial:turn.after_reasoning.before_event_bus:citation",
+        "serial:turn.after_reasoning.before_persist:citation",
     )
+    root = snapshot.composition_root
+    assert root is not None
     await manager.terminate_all()
+    assert root.receipt().services == ()
+    assert root.receipt().effects == ()
