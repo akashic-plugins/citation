@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import shutil
-from types import SimpleNamespace
 
 import pytest
 
@@ -21,9 +20,6 @@ from agent.plugins.manager import PluginManager
 from bus.event_bus import EventBus
 from plugin import (
     CITATION_PROTOCOL_SERVICE,
-    CitationAfterReasoningModule,
-    CitationPromptModule,
-    ProtocolTagCleanupModule,
     apply,
     extract_cited_ids,
     extract_cited_ids_from_tool_chain,
@@ -85,29 +81,10 @@ def test_extract_cited_ids_from_recall_memory_tool_chain() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prompt_module_injects_protocol() -> None:
-    ctx = _prompt_ctx()
-    frame = SimpleNamespace(slots={"prompt:ctx": ctx})
-    await CitationPromptModule().run(frame)
-    assert ctx.system_sections_bottom[0].name == "citation_protocol"
-
-
-@pytest.mark.asyncio
-async def test_after_reasoning_modules_strip_and_persist() -> None:
-    ctx = _answer_ctx("答复正文\n§cited:[mem_1]§ <meme:shy>")
-    frame = SimpleNamespace(slots={"reasoning:ctx": ctx})
-    await CitationAfterReasoningModule().run(frame)
-    assert frame.slots["persist:assistant:cited_memory_ids"] == ["mem_1"]
-    assert ctx.reply == "答复正文 <meme:shy>"
-    await ProtocolTagCleanupModule().run(frame)
-    assert ctx.reply == "答复正文"
-
-
-@pytest.mark.asyncio
-async def test_v3_named_exports_match_legacy_lifecycle_behavior(
+async def test_v3_named_exports_run_complete_lifecycle_behavior(
     tmp_path: Path,
 ) -> None:
-    ComposablePlugin.from_module(citation_module)
+    _ = ComposablePlugin.from_module(citation_module)
     root = CompositionRoot("citation-parity")
 
     async def mount(ctx) -> None:
@@ -128,28 +105,23 @@ async def test_v3_named_exports_match_legacy_lifecycle_behavior(
     assert root.receipt().ready is True
     assert root.context.require(CITATION_PROTOCOL_SERVICE).version == 1
 
-    legacy_prompt = _prompt_ctx()
-    await CitationPromptModule().run(
-        SimpleNamespace(slots={"prompt:ctx": legacy_prompt})
-    )
     v3_prompt = _prompt_ctx()
-    await root.context.serial(PROMPT_RENDER_EVENT, v3_prompt)
-    assert v3_prompt.system_sections_bottom == legacy_prompt.system_sections_bottom
+    _ = await root.context.serial(PROMPT_RENDER_EVENT, v3_prompt)
+    assert [section.name for section in v3_prompt.system_sections_bottom] == [
+        "citation_protocol"
+    ]
 
     reply = "答复正文\n§cited:[mem_1]§ <meme:shy>"
-    legacy_answer = _answer_ctx(reply)
-    legacy_frame = SimpleNamespace(slots={"reasoning:ctx": legacy_answer})
-    await CitationAfterReasoningModule().run(legacy_frame)
-    await ProtocolTagCleanupModule().run(legacy_frame)
     v3_answer = _answer_ctx(reply)
-    await root.context.serial(AFTER_REASONING_PREPROCESS_EVENT, v3_answer)
-    await root.context.serial(AFTER_REASONING_CLEANUP_EVENT, v3_answer)
-
-    assert v3_answer.reply == legacy_answer.reply
-    assert v3_answer.persist_assistant_metadata["cited_memory_ids"] == (
-        legacy_frame.slots["persist:assistant:cited_memory_ids"]
-    )
+    _ = await root.context.serial(AFTER_REASONING_PREPROCESS_EVENT, v3_answer)
+    assert v3_answer.reply == "答复正文 <meme:shy>"
+    assert v3_answer.persist_assistant_metadata["cited_memory_ids"] == ["mem_1"]
+    _ = await root.context.serial(AFTER_REASONING_CLEANUP_EVENT, v3_answer)
+    assert v3_answer.reply == "答复正文"
     await root.dispose()
+    assert root.receipt().services == ()
+    assert root.receipt().effects == ()
+    assert root.topology_view().listeners == ()
 
 
 @pytest.mark.asyncio
@@ -190,4 +162,9 @@ async def test_v3_plugin_loads_through_real_generation_manager(
         "serial:turn.after_reasoning.preprocess:citation",
         "serial:turn.after_reasoning.cleanup:citation",
     )
+    root = snapshot.composition_root
+    assert root is not None
     await manager.terminate_all()
+    assert root.receipt().services == ()
+    assert root.receipt().effects == ()
+    assert root.topology_view().listeners == ()
