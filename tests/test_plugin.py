@@ -161,7 +161,13 @@ async def test_v3_plugin_loads_through_real_generation_manager(
     shutil.copytree(
         Path(__file__).parents[1],
         plugin_home / "citation",
-        ignore=shutil.ignore_patterns(".git", ".pytest_cache", "__pycache__"),
+        ignore=shutil.ignore_patterns(
+            ".akashic-core",
+            ".git",
+            ".plugin-contracts",
+            ".pytest_cache",
+            "__pycache__",
+        ),
     )
     manager = PluginManager(
         plugin_dirs=[plugin_home],
