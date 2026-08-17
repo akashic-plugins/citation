@@ -17,6 +17,7 @@ from agent.lifecycle.types import AfterReasoningCtx, PromptRenderCtx
 from agent.plugin_composition import CompositionRoot, PluginRuntime
 from agent.plugins.composable import ComposablePlugin
 from agent.plugins.manager import PluginManager
+from agent.plugins.static_manifest import load_static_plugin_manifest
 from bus.event_bus import EventBus
 from plugin import (
     CITATION_PROTOCOL_SERVICE,
@@ -56,6 +57,17 @@ def _answer_ctx(reply: str) -> AfterReasoningCtx:
         context_retry={},
         reply=reply,
     )
+
+
+def test_static_manifest_matches_v3_module() -> None:
+    manifest = load_static_plugin_manifest(
+        Path(citation_module.__file__ or "").resolve().parent
+    )
+
+    assert manifest.name == citation_module.name == "citation"
+    assert manifest.version == citation_module.version == "1.0.0"
+    assert manifest.api_version == citation_module.api_version == 3
+    assert manifest.entrypoint == "plugin.py"
 
 
 def test_extract_cited_ids_keeps_trailing_meme_tag() -> None:
