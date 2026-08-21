@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, cast
+from dataclasses import dataclass
+from typing import cast
 
-from agent.lifecycle.types import PromptRenderCtx
-from agent.plugins import Plugin
+from agent.lifecycle.composition import (
+    AFTER_REASONING_CLEANUP_EVENT,
+    AFTER_REASONING_PREPROCESS_EVENT,
+    PROMPT_RENDER_EVENT,
+)
+from agent.lifecycle.types import AfterReasoningCtx, PromptRenderCtx
+from agent.plugin_composition import Context, ServiceKey
 from agent.prompting import PromptSectionRender
 
-_PROMPT_CTX_SLOT = "prompt:ctx"
-_REASONING_CTX_SLOT = "reasoning:ctx"
-_PERSIST_CITED_SLOT = "persist:assistant:cited_memory_ids"
 _TRAILING_PROTOCOL_TAG = r"<[a-zA-Z][a-zA-Z0-9_-]*:[^<>\s]+>"
 _CITED_RE = re.compile(
     rf"(?:\n|\r\n)?§cited:\[([A-Za-z0-9_:,\-\s]*)\]§(?P<trailing>(?:\s*{_TRAILING_PROTOCOL_TAG}\s*)*)$",
@@ -20,7 +23,9 @@ _TRAILING_PROTOCOL_TAGS_RE = re.compile(
     rf"(?:\s*{_TRAILING_PROTOCOL_TAG}\s*)+$",
     re.IGNORECASE,
 )
-_INLINE_MEMORY_REF_RE = re.compile(r"[ \t]*(?:\[§[A-Za-z0-9:_-]{1,128}\])+", re.IGNORECASE)
+_INLINE_MEMORY_REF_RE = re.compile(
+    r"[ \t]*(?:\[§[A-Za-z0-9:_-]{1,128}\])+", re.IGNORECASE
+)
 
 _CITATION_PROTOCOL = """### 记忆引用协议 - 内部元数据，对用户不可见
 每轮回复若用到了系统注入的记忆条目 [item_id] 前缀标识，或 recall_memory / fetch_messages 工具返回的条目，在回复正文末尾另起一行输出：
@@ -31,76 +36,70 @@ _CITATION_PROTOCOL = """### 记忆引用协议 - 内部元数据，对用户不�
 你了解用户的事是因为你们相处了很久，直接说你上次、我记得，不要暴露内部机制。"""
 
 
-class CitationPromptModule:
-    slot = "citation.prompt"
-    requires = ("prompt_render.emit", _PROMPT_CTX_SLOT)
-    produces = (_PROMPT_CTX_SLOT,)
+@dataclass(frozen=True, slots=True)
+class CitationProtocol:
+    version: int = 1
 
-    async def run(self, frame: Any) -> Any:
-        ctx = frame.slots.get(_PROMPT_CTX_SLOT)
-        if not isinstance(ctx, PromptRenderCtx):
-            return frame
-        ctx.system_sections_bottom.append(
-            PromptSectionRender(
-                name="citation_protocol",
-                content=_CITATION_PROTOCOL,
-                is_static=True,
-            )
+
+CITATION_PROTOCOL_SERVICE = ServiceKey[CitationProtocol]("citation.protocol")
+
+
+def append_citation_protocol(ctx: PromptRenderCtx) -> None:
+    ctx.system_sections_bottom.append(
+        PromptSectionRender(
+            name="citation_protocol",
+            content=_CITATION_PROTOCOL,
+            is_static=True,
         )
-        return frame
+    )
 
 
-class CitationAfterReasoningModule:
-    slot = "citation.after_reasoning"
-    requires = ("after_reasoning.build_ctx", _REASONING_CTX_SLOT)
-    produces = (_REASONING_CTX_SLOT, _PERSIST_CITED_SLOT)
+def preprocess_citation(ctx: AfterReasoningCtx) -> list[str]:
+    """Strip citation metadata and return the IDs that Core should persist."""
 
-    async def run(self, frame: Any) -> Any:
-        ctx = frame.slots.get(_REASONING_CTX_SLOT)
-        if ctx is None:
-            return frame
-        reply = str(getattr(ctx, "reply", "") or "")
-        cleaned, cited_ids = extract_cited_ids(reply)
-        cleaned = strip_inline_memory_refs(cleaned)
-        if cited_ids:
-            frame.slots[_PERSIST_CITED_SLOT] = cited_ids
-        else:
-            fallback_ids = extract_cited_ids_from_tool_chain(
-                list(getattr(ctx, "tool_chain", ()) or ())
-            )
-            if fallback_ids:
-                frame.slots[_PERSIST_CITED_SLOT] = fallback_ids
-        if cleaned != reply:
-            ctx.reply = cleaned
-        return frame
+    # 1. Prefer the explicit response protocol and preserve later plugin tags.
+    reply = str(ctx.reply or "")
+    cleaned, cited_ids = extract_cited_ids(reply)
+    cleaned = strip_inline_memory_refs(cleaned)
+
+    # 2. Fall back to the real recall tool chain when no IDs were declared.
+    if not cited_ids:
+        cited_ids = extract_cited_ids_from_tool_chain(list(ctx.tool_chain or ()))
+    if cleaned != reply:
+        ctx.reply = cleaned
+    return cited_ids
 
 
-class ProtocolTagCleanupModule:
-    slot = "citation.protocol_cleanup"
-    requires = ("after_reasoning.emit", _REASONING_CTX_SLOT)
-    produces = (_REASONING_CTX_SLOT,)
-
-    async def run(self, frame: Any) -> Any:
-        ctx = frame.slots.get(_REASONING_CTX_SLOT)
-        if ctx is None:
-            return frame
-        reply = str(getattr(ctx, "reply", "") or "")
-        cleaned = strip_inline_memory_refs(strip_trailing_protocol_tags(reply))
-        if cleaned != reply:
-            ctx.reply = cleaned
-        return frame
+def cleanup_protocol_tags(ctx: AfterReasoningCtx) -> None:
+    reply = str(ctx.reply or "")
+    cleaned = strip_inline_memory_refs(strip_trailing_protocol_tags(reply))
+    if cleaned != reply:
+        ctx.reply = cleaned
 
 
-class CitationPlugin(Plugin):
-    api_version = 2
-    name = "citation"
-    version = "1.0.0"
+def _persist_v3_citation(ctx: AfterReasoningCtx) -> None:
+    cited_ids = preprocess_citation(ctx)
+    if cited_ids:
+        ctx.persist_assistant_metadata["cited_memory_ids"] = cited_ids
 
-    def prompt_render_modules(self) -> list[object]:
-        return [CitationPromptModule()]
 
-    def after_reasoning_modules(self) -> list[object]:
-        return [CitationAfterReasoningModule(), ProtocolTagCleanupModule()]
+api_version = 3
+name = "citation"
+version = "1.0.0"
+inject: tuple[ServiceKey[object], ...] = ()
+
+
+async def apply(ctx: Context, config: object) -> None:
+    """Register citation lifecycle behavior and its ordering Service."""
+
+    # 1. Register the three lifecycle listeners in their explicit event order.
+    _ = config
+    _ = await ctx.on(PROMPT_RENDER_EVENT, append_citation_protocol)
+    _ = await ctx.on(AFTER_REASONING_PREPROCESS_EVENT, _persist_v3_citation)
+    _ = await ctx.on(AFTER_REASONING_CLEANUP_EVENT, cleanup_protocol_tags)
+
+    # 2. Publish last so dependents unload before citation listeners disappear.
+    _ = await ctx.provide(CITATION_PROTOCOL_SERVICE, CitationProtocol())
 
 
 def extract_cited_ids(response: str) -> tuple[str, list[str]]:
