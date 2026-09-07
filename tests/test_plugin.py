@@ -39,6 +39,20 @@ def test_static_manifest_matches_v3_module() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prompt_example_is_accepted_by_the_decoder() -> None:
+    example = next(
+        line
+        for line in citation_module._CITATION_PROTOCOL.splitlines()
+        if line.startswith("§cited:")
+    )
+    spans, metadata = await citation_module.decode_citations(
+        TextSource(example, ()), ()
+    )
+    assert len(spans) == 1
+    assert [record["ref"] for record in metadata["references"]] == ["id1", "id2", "id3"]
+
+
+@pytest.mark.asyncio
 async def test_decoder_tracks_declared_and_retrieved_evidence() -> None:
     source = TextSource(
         '答复 [§known]\n§cited:["known","unknown"]§ <meme:shy>',
