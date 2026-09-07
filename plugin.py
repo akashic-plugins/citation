@@ -2,33 +2,24 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
-from typing import cast
+from collections.abc import Mapping, Sequence
 
-from agent.lifecycle.composition import (
-    AFTER_REASONING_CLEANUP_EVENT,
-    AFTER_REASONING_PREPROCESS_EVENT,
-    PROMPT_RENDER_EVENT,
-)
-from agent.lifecycle.types import AfterReasoningCtx, PromptRenderCtx
-from agent.plugin_composition import Context, ServiceKey
-from agent.prompting import PromptSectionRender
+from agent.plugin_composition import Context
+from plugins.content.api import Reference, Span, TextProtocol, TextSource
+from plugins.content.plugin import CONTENT
 
-_TRAILING_PROTOCOL_TAG = r"<[a-zA-Z][a-zA-Z0-9_-]*:[^<>\s]+>"
+_PROTOCOL_TAG = r"<[a-zA-Z][a-zA-Z0-9_-]*:[^<>\s]+>"
 _CITED_RE = re.compile(
-    rf"(?:\n|\r\n)?§cited:\[([A-Za-z0-9_:,\-\s]*)\]§(?P<trailing>(?:\s*{_TRAILING_PROTOCOL_TAG}\s*)*)$",
+    r"(?:\r?\n)?§cited:(\[[^\]]*\])§",
     re.IGNORECASE,
 )
-_TRAILING_PROTOCOL_TAGS_RE = re.compile(
-    rf"(?:\s*{_TRAILING_PROTOCOL_TAG}\s*)+$",
-    re.IGNORECASE,
-)
+_PROTOCOL_SUFFIX_RE = re.compile(rf"(?:\s*{_PROTOCOL_TAG}\s*)*$", re.IGNORECASE)
 _INLINE_MEMORY_REF_RE = re.compile(
     r"[ \t]*(?:\[§[A-Za-z0-9:_-]{1,128}\])+", re.IGNORECASE
 )
 
 _CITATION_PROTOCOL = """### 记忆引用协议 - 内部元数据，对用户不可见
-每轮回复若用到了系统注入的记忆条目 [item_id] 前缀标识，或 recall_memory / fetch_messages 工具返回的条目，在回复正文末尾另起一行输出：
+每轮回复若用到了系统注入的记忆条目 [item_id] 前缀标识，或召回结果中的条目，在回复正文末尾另起一行输出：
 §cited:[id1,id2,id3]§
 格式规则：§ 包裹，英文逗号分隔，无空格，只写 ID，不含其他内容。
 若本轮未引用任何记忆条目，不输出此行。
@@ -36,134 +27,101 @@ _CITATION_PROTOCOL = """### 记忆引用协议 - 内部元数据，对用户不�
 你了解用户的事是因为你们相处了很久，直接说你上次、我记得，不要暴露内部机制。"""
 
 
-@dataclass(frozen=True, slots=True)
-class CitationProtocol:
-    version: int = 1
+def _available_references(
+    references: tuple[Reference, ...],
+) -> dict[str, Reference]:
+    available: dict[str, Reference] = {}
+    for reference in references:
+        existing = available.get(reference.ref)
+        if existing is not None and existing != reference:
+            raise ValueError(f"同一引用包含冲突证据: {reference.ref}")
+        available[reference.ref] = reference
+    return available
 
 
-CITATION_PROTOCOL_SERVICE = ServiceKey[CitationProtocol]("citation.protocol")
+def _citation_record(
+    ref: str,
+    *,
+    declared: bool,
+    reference: Reference | None,
+) -> dict[str, object]:
+    record: dict[str, object] = {"ref": ref, "declared": declared}
+    if reference is not None:
+        if reference.retrieval_ref is not None:
+            record["retrieval_ref"] = reference.retrieval_ref
+        if reference.resolved_ref is not None:
+            record["resolved_ref"] = reference.resolved_ref
+    return record
 
 
-def append_citation_protocol(ctx: PromptRenderCtx) -> None:
-    ctx.system_sections_bottom.append(
-        PromptSectionRender(
-            name="citation_protocol",
-            content=_CITATION_PROTOCOL,
-            is_static=True,
-        )
+def _declared_ids(source: TextSource) -> tuple[list[Span], list[str]]:
+    spans: list[Span] = []
+    declared: list[str] = []
+    seen: set[str] = set()
+    for match in source.matches(_CITED_RE):
+        if _PROTOCOL_SUFFIX_RE.fullmatch(source.text[match.end() :]) is None:
+            continue
+        try:
+            raw: object = json.loads(match.group(1))
+        except json.JSONDecodeError as error:
+            raise ValueError("引用协议列表不是合法 JSON") from error
+        if not isinstance(raw, list) or any(
+            not isinstance(item, str) or not item for item in raw
+        ):
+            raise ValueError("引用协议必须是非空字符串列表")
+        for item in raw:
+            if item not in seen:
+                seen.add(item)
+                declared.append(item)
+        spans.append(Span(match.start(), match.end(), ()))
+    return spans, declared
+
+
+async def decode_citations(
+    source: TextSource,
+    references: tuple[Reference, ...],
+) -> tuple[Sequence[Span], Mapping[str, object]]:
+    """清理自有引用标记，并保留声明与真实召回证据。"""
+    available = _available_references(references)
+    spans, declared = _declared_ids(source)
+    spans.extend(
+        Span(match.start(), match.end(), ())
+        for match in source.matches(_INLINE_MEMORY_REF_RE)
     )
-
-
-def preprocess_citation(ctx: AfterReasoningCtx) -> list[str]:
-    """Strip citation metadata and return the IDs that Core should persist."""
-
-    # 1. Prefer the explicit response protocol and preserve later plugin tags.
-    reply = str(ctx.reply or "")
-    cleaned, cited_ids = extract_cited_ids(reply)
-    cleaned = strip_inline_memory_refs(cleaned)
-
-    # 2. Fall back to the real recall tool chain when no IDs were declared.
-    if not cited_ids:
-        cited_ids = extract_cited_ids_from_tool_chain(list(ctx.tool_chain or ()))
-    if cleaned != reply:
-        ctx.reply = cleaned
-    return cited_ids
-
-
-def cleanup_protocol_tags(ctx: AfterReasoningCtx) -> None:
-    reply = str(ctx.reply or "")
-    cleaned = strip_inline_memory_refs(strip_trailing_protocol_tags(reply))
-    if cleaned != reply:
-        ctx.reply = cleaned
-
-
-def _persist_v3_citation(ctx: AfterReasoningCtx) -> None:
-    cited_ids = preprocess_citation(ctx)
-    if cited_ids:
-        ctx.persist_assistant_metadata["cited_memory_ids"] = cited_ids
+    if declared:
+        records = [
+            _citation_record(
+                ref,
+                declared=True,
+                reference=available.get(ref),
+            )
+            for ref in declared
+        ]
+    else:
+        records = [
+            _citation_record(ref, declared=False, reference=reference)
+            for ref, reference in available.items()
+            if reference.retrieval_ref is not None
+        ]
+    metadata: Mapping[str, object] = (
+        {"version": 1, "references": records} if records else {}
+    )
+    return spans, metadata
 
 
 api_version = 3
 name = "citation"
-version = "1.0.0"
-inject: tuple[ServiceKey[object], ...] = ()
+version = "2.0.0"
+inject = (CONTENT,)
 
 
 async def apply(ctx: Context, config: object) -> None:
-    """Register citation lifecycle behavior and its ordering Service."""
-
-    # 1. Register the three lifecycle listeners in their explicit event order.
+    """注册 Citation 自有的提示、解析器与 metadata 贡献。"""
     _ = config
-    _ = await ctx.on(PROMPT_RENDER_EVENT, append_citation_protocol)
-    _ = await ctx.on(AFTER_REASONING_PREPROCESS_EVENT, _persist_v3_citation)
-    _ = await ctx.on(AFTER_REASONING_CLEANUP_EVENT, cleanup_protocol_tags)
-
-    # 2. Publish last so dependents unload before citation listeners disappear.
-    _ = await ctx.provide(CITATION_PROTOCOL_SERVICE, CitationProtocol())
-
-
-def extract_cited_ids(response: str) -> tuple[str, list[str]]:
-    match = _CITED_RE.search(response)
-    if not match:
-        return response, []
-    raw = match.group(1)
-    ids = [item.strip() for item in raw.split(",") if item.strip()]
-    trailing = match.group("trailing").strip()
-    clean = response[: match.start()].rstrip()
-    if trailing:
-        clean = f"{clean} {trailing}".strip()
-    return clean, ids
-
-
-def strip_trailing_protocol_tags(response: str) -> str:
-    return _TRAILING_PROTOCOL_TAGS_RE.sub("", response).rstrip()
-
-
-def strip_inline_memory_refs(response: str) -> str:
-    return _INLINE_MEMORY_REF_RE.sub("", response).rstrip()
-
-
-def extract_cited_ids_from_tool_chain(
-    tool_chain: list[dict[str, object]],
-) -> list[str]:
-    cited: list[str] = []
-    seen: set[str] = set()
-    for group in tool_chain:
-        calls_value = group.get("calls")
-        if not isinstance(calls_value, list):
-            continue
-        calls = cast(list[object], calls_value)
-        for raw_call in calls:
-            if not isinstance(raw_call, dict):
-                continue
-            call = cast(dict[str, object], raw_call)
-            if str(call.get("name", "") or "") != "recall_memory":
-                continue
-            raw_result = str(call.get("result", "") or "").strip()
-            if not raw_result:
-                continue
-            try:
-                decoded = json.loads(raw_result)
-            except (json.JSONDecodeError, TypeError, ValueError):
-                continue
-            if not isinstance(decoded, dict):
-                continue
-            data = cast(dict[str, object], decoded)
-            raw_ids: list[object] = []
-            cited_ids = data.get("cited_item_ids")
-            if isinstance(cited_ids, list):
-                raw_ids.extend(cast(list[object], cited_ids))
-            else:
-                items_value = data.get("items")
-                if isinstance(items_value, list):
-                    items = cast(list[object], items_value)
-                    for raw_item in items:
-                        if isinstance(raw_item, dict):
-                            item = cast(dict[str, object], raw_item)
-                            raw_ids.append(item.get("id"))
-            for raw_id in raw_ids:
-                item_id = str(raw_id or "").strip()
-                if item_id and item_id not in seen:
-                    seen.add(item_id)
-                    cited.append(item_id)
-    return cited
+    protocol = TextProtocol(
+        name="citation",
+        prompt=_CITATION_PROTOCOL,
+        decode=decode_citations,
+        content={},
+    )
+    _ = await ctx.require(CONTENT).register(ctx, protocol)

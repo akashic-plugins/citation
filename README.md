@@ -1,36 +1,14 @@
 # citation 插件
 
-记忆引用追踪协议。在系统 prompt 中注入引用规范，从 LLM 回复里提取引用的记忆 ID，并清理协议标签。
+记忆引用追踪协议。插件向 Core 的普通 Content 服务注册提示与文本解析器，清理回复中的引用标记，并把引用依据保存到 `Message.metadata.citation`。
 
----
+## 行为
 
-## 接入点
+- 提示模型在使用记忆后输出 `§cited:[id1,id2]§`。
+- 只解析非 Markdown 代码区间中的自有引用标记，不清理其他插件的协议。
+- 模型声明的引用记录为 `declared=true`。
+- 调用方提供的真实召回 `Reference` 可补充 `retrieval_ref` 和 `resolved_ref`。
+- 没有显式声明时，只把带真实 `retrieval_ref` 的候选记录为 `declared=false`。
+- 未解析的模型引用保留原始 `ref`，不会伪造来源。
 
-| 接入方式 | 阶段 |
-|---|---|
-| v3 `PROMPT_RENDER_EVENT` | 注入引用协议文本 |
-| v3 `AFTER_REASONING_PREPROCESS_EVENT` | 提取 cited ID 到 `persist_assistant_metadata` |
-| v3 `AFTER_REASONING_CLEANUP_EVENT` | 清理残留协议标签 |
-
-插件通过模块命名导出 `api_version = 3` 与 `apply(ctx, config)` 注册这些 listener，并提供 `citation.protocol` Service 给依赖引用协议顺序的插件。Core 只负责生命周期接入、作用域回收和依赖排序，引用协议及其数据解释仍由插件拥有。
-
----
-
-## 运作逻辑
-
-### 1. 注入引用协议
-
-每轮推理前，在系统 prompt 底部追加一段隐藏指令（`_CITATION_PROTOCOL`），要求 LLM 在用到记忆条目时，在回复末尾输出 `§cited:[id1,id2]§` 格式的引用行，且不向用户暴露这行的存在。
-
-### 2. 提取 cited ID
-
-推理完成后，用正则扫描 `reply` 尾部，匹配 `§cited:[...]§` 标签：
-
-- 若匹配成功，提取 ID 列表，v3 写入 `AfterReasoningCtx.persist_assistant_metadata["cited_memory_ids"]`，并把标签从 reply 中剥除。
-- 若 reply 里没有引用行，fallback 到工具调用链：扫描 `recall_memory` 工具的返回结果，从 JSON 里取出 `cited_item_ids` 或 `items[].id`，作为本轮引用 ID。
-
-提取到的 ID 由下游持久化模块写入数据库，用于更新记忆条目的被引用计数和时间戳。
-
-### 3. 清理协议标签
-
-在 persist 之前再做一次扫描，用正则清除 reply 末尾所有残留的 `<tag:value>` 形式协议标签（包括其他插件可能留下的），保证对外输出的文本干净。
+插件不读取工具调用名，也不依赖其他内容协议。Content 在同一 generation lease 中组合正文与 metadata，并随 Message 原子提交。
