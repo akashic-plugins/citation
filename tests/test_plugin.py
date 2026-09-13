@@ -11,9 +11,9 @@ from agent.plugins.manager import PluginManager
 from agent.plugins.snapshot import bind_runtime_snapshot, reset_runtime_snapshot
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from bus.event_bus import EventBus
-from plugins.content.api import Reference, TextSource
+from boundary import Reference, TextSource
 from plugins.content import plugin as content_module
-from plugins.content.plugin import CONTENT
+from boundary import CONTENT
 from session.log import MessageLog
 from session.message import ContentPart, Output
 from session.message_codec import json_value
@@ -62,7 +62,7 @@ async def test_decoder_tracks_declared_and_retrieved_evidence() -> None:
         source,
         (Reference("known", "memory@2", "retrieval:1"),),
     )
-    assert [(span.start, span.end, span.parts) for span in spans]
+    assert [(span["start"], span["end"], span["parts"]) for span in spans]
     assert metadata == {
         "version": 1,
         "references": [
@@ -143,7 +143,11 @@ async def test_real_manager_content_service_preserves_literals_and_other_protoco
             )
             parts, metadata = await view.decode(
                 raw,
-                (Reference("known", "memory@2", "retrieval:1"),),
+                ({
+                    "ref": "known",
+                    "resolved_ref": "memory@2",
+                    "retrieval_ref": "retrieval:1",
+                },),
             )
             assert _visible(parts) == ('答复\n`§cited:["literal"]§` <meme:shy>')
             assert json_value(metadata["citation"]) == {

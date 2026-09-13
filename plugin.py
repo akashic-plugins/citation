@@ -5,8 +5,12 @@ import re
 from collections.abc import Mapping, Sequence
 
 from agent.plugin_composition import Context
-from plugins.content.api import Reference, Span, TextProtocol, TextSource
-from plugins.content.plugin import CONTENT
+from agent.plugin_contracts import ContentPart
+
+if __package__:
+    from .boundary import CONTENT, Reference, SpanData, TextSource
+else:  # test harness imports the entrypoint as a standalone module
+    from boundary import CONTENT, Reference, SpanData, TextSource
 
 _PROTOCOL_TAG = r"<[a-zA-Z][a-zA-Z0-9_-]*:[^<>\s]+>"
 _CITED_RE = re.compile(
@@ -54,8 +58,8 @@ def _citation_record(
     return record
 
 
-def _declared_ids(source: TextSource) -> tuple[list[Span], list[str]]:
-    spans: list[Span] = []
+def _declared_ids(source: TextSource) -> tuple[list[SpanData], list[str]]:
+    spans: list[SpanData] = []
     declared: list[str] = []
     seen: set[str] = set()
     for match in source.matches(_CITED_RE):
@@ -73,19 +77,19 @@ def _declared_ids(source: TextSource) -> tuple[list[Span], list[str]]:
             if item not in seen:
                 seen.add(item)
                 declared.append(item)
-        spans.append(Span(match.start(), match.end(), ()))
+        spans.append({"start": match.start(), "end": match.end(), "parts": ()})
     return spans, declared
 
 
 async def decode_citations(
     source: TextSource,
     references: tuple[Reference, ...],
-) -> tuple[Sequence[Span], Mapping[str, object]]:
+) -> tuple[Sequence[SpanData], Mapping[str, object]]:
     """清理自有引用标记，并保留声明与真实召回证据。"""
     available = _available_references(references)
     spans, declared = _declared_ids(source)
     spans.extend(
-        Span(match.start(), match.end(), ())
+        {"start": match.start(), "end": match.end(), "parts": ()}
         for match in source.matches(_INLINE_MEMORY_REF_RE)
     )
     if declared:
@@ -118,10 +122,12 @@ inject = (CONTENT,)
 async def apply(ctx: Context, config: object) -> None:
     """注册 Citation 自有的提示、解析器与 metadata 贡献。"""
     _ = config
-    protocol = TextProtocol(
-        name="citation",
-        prompt=_CITATION_PROTOCOL,
-        decode=decode_citations,
-        content={},
+    _ = await ctx.require(CONTENT).register(
+        ctx,
+        {
+            "name": "citation",
+            "prompt": _CITATION_PROTOCOL,
+            "decode": decode_citations,
+            "content": {},
+        },
     )
-    _ = await ctx.require(CONTENT).register(ctx, protocol)
