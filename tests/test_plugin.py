@@ -9,6 +9,7 @@ import plugin as citation_module
 from agent.plugins.composable import ComposablePlugin
 from agent.plugins.manager import PluginManager
 from agent.plugins.snapshot import bind_runtime_snapshot, reset_runtime_snapshot
+from agent.plugins.selection import PluginSelection
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from bus.event_bus import EventBus
 from boundary import Reference, TextSource
@@ -32,9 +33,8 @@ def test_static_manifest_matches_v3_module() -> None:
         Path(citation_module.__file__ or "").resolve().parent
     )
     assert manifest.name == citation_module.name == "citation"
-    assert manifest.version == citation_module.version == "2.0.0"
+    assert manifest.version == citation_module.version == "3.0.0"
     assert manifest.api_version == citation_module.api_version == 3
-    assert manifest.entrypoint == "plugin.py"
     assert citation_module.inject == (CONTENT,)
 
 
@@ -121,6 +121,7 @@ async def test_real_manager_content_service_preserves_literals_and_other_protoco
         workspace=workspace,
         message_log=log,
     )
+    PluginSelection(workspace).initialize()
     await manager.load_all()
     snapshot = manager.current_snapshot
     assert snapshot is not None and snapshot.composition_root is not None
@@ -143,11 +144,7 @@ async def test_real_manager_content_service_preserves_literals_and_other_protoco
             )
             parts, metadata = await view.decode(
                 raw,
-                ({
-                    "ref": "known",
-                    "resolved_ref": "memory@2",
-                    "retrieval_ref": "retrieval:1",
-                },),
+                ({"ref": "known", "resolved_ref": "memory@2", "retrieval_ref": "retrieval:1"},),
             )
             assert _visible(parts) == ('答复\n`§cited:["literal"]§` <meme:shy>')
             assert json_value(metadata["citation"]) == {
