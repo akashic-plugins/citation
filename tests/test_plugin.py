@@ -8,7 +8,6 @@ import pytest
 import plugin as citation_module
 from agent.plugins.composable import ComposablePlugin
 from agent.plugins.manager import PluginManager
-from agent.plugins.snapshot import bind_runtime_snapshot, reset_runtime_snapshot
 from agent.plugins.selection import PluginSelection
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from bus.event_bus import EventBus
@@ -123,18 +122,15 @@ async def test_real_manager_content_service_preserves_literals_and_other_protoco
     )
     PluginSelection(workspace).initialize()
     await manager.load_all()
-    snapshot = manager.current_snapshot
-    assert snapshot is not None and snapshot.composition_root is not None
+    root = manager.live_root
+    assert root is not None
     generation = manager.generation("citation")
     assert generation is not None
     assert isinstance(generation.instance, ComposablePlugin)
-    assert snapshot.composition_topology is not None
-    assert snapshot.composition_topology.listeners == ()
+    assert root.topology_view().listeners == ()
 
-    lease = manager._snapshot_store.lease()  # pyright: ignore[reportPrivateUsage]
-    token = bind_runtime_snapshot(lease)
     try:
-        content = snapshot.composition_root.context.require(CONTENT)
+        content = root.context.require(CONTENT)
         async with content.bind() as view:
             assert len(view.prompts) == 1
             raw = (
@@ -177,9 +173,6 @@ async def test_real_manager_content_service_preserves_literals_and_other_protoco
                 == "memory@2"
             )
     finally:
-        reset_runtime_snapshot(token)
-        await lease.release()
-        root = snapshot.composition_root
         await manager.terminate_all()
         log.close()
         assert root.receipt().effects == ()
