@@ -115,13 +115,12 @@ async def decode_citations(
 
 api_version = 3
 name = "citation"
-version = "2.0.0"
+version = "3.0.0"
 inject = (CONTENT,)
 
 
-async def apply(ctx: Context, config: object) -> None:
+async def apply(ctx: Context) -> None:
     """注册 Citation 自有的提示、解析器与 metadata 贡献。"""
-    _ = config
     _ = await ctx.require(CONTENT).register(
         ctx,
         {
