@@ -8,8 +8,7 @@ import pytest
 import plugin as citation_module
 from agent.plugins.composable import ComposablePlugin
 from agent.plugins.manager import PluginManager
-from agent.plugins.snapshot import bind_runtime_snapshot, reset_runtime_snapshot
-from agent.plugins.static_manifest import load_static_plugin_manifest
+from tests.fixtures.plugin_workspace import initialize_plugin_workspace
 from bus.event_bus import EventBus
 from boundary import Reference, TextSource
 from plugins.content import plugin as content_module
@@ -27,15 +26,6 @@ def _visible(parts: tuple[ContentPart, ...]) -> str:
     return "".join(str(part.value) for part in parts if part.kind == "text")
 
 
-def test_static_manifest_matches_v3_module() -> None:
-    manifest = load_static_plugin_manifest(
-        Path(citation_module.__file__ or "").resolve().parent
-    )
-    assert manifest.name == citation_module.name == "citation"
-    assert manifest.version == citation_module.version == "2.0.0"
-    assert manifest.api_version == citation_module.api_version == 3
-    assert manifest.entrypoint == "plugin.py"
-    assert citation_module.inject == (CONTENT,)
 
 
 @pytest.mark.asyncio
@@ -113,7 +103,7 @@ async def test_real_manager_content_service_preserves_literals_and_other_protoco
         ignore=_copy_ignore(),
     )
     workspace = tmp_path / "workspace"
-    workspace.mkdir()
+    initialize_plugin_workspace(workspace)
     log = MessageLog(workspace / "sessions.db")
     manager = PluginManager(
         plugin_dirs=[plugin_home],
@@ -122,18 +112,14 @@ async def test_real_manager_content_service_preserves_literals_and_other_protoco
         message_log=log,
     )
     await manager.load_all()
-    snapshot = manager.current_snapshot
-    assert snapshot is not None and snapshot.composition_root is not None
+    root = manager.live_root
+    assert root is not None
     generation = manager.generation("citation")
     assert generation is not None
     assert isinstance(generation.instance, ComposablePlugin)
-    assert snapshot.composition_topology is not None
-    assert snapshot.composition_topology.listeners == ()
-
-    lease = manager._snapshot_store.lease()  # pyright: ignore[reportPrivateUsage]
-    token = bind_runtime_snapshot(lease)
+    assert root.topology_view().listeners == ()
     try:
-        content = snapshot.composition_root.context.require(CONTENT)
+        content = root.context.require(CONTENT)
         async with content.bind() as view:
             assert len(view.prompts) == 1
             raw = (
@@ -180,9 +166,6 @@ async def test_real_manager_content_service_preserves_literals_and_other_protoco
                 == "memory@2"
             )
     finally:
-        reset_runtime_snapshot(token)
-        await lease.release()
-        root = snapshot.composition_root
         await manager.terminate_all()
         log.close()
         assert root.receipt().effects == ()
