@@ -5,12 +5,9 @@ import re
 from collections.abc import Mapping, Sequence
 
 from agent.plugin_composition import Context
-from agent.plugin_contracts import ContentPart
+from plugins.ledger.contract import ContentPart
 
-if __package__:
-    from .boundary import CONTENT, Reference, SpanData, TextSource
-else:  # test harness imports the entrypoint as a standalone module
-    from boundary import CONTENT, Reference, SpanData, TextSource
+from plugins.content.contract import CONTENT, Reference, SpanData, TextSource
 
 _PROTOCOL_TAG = r"<[a-zA-Z][a-zA-Z0-9_-]*:[^<>\s]+>"
 _CITED_RE = re.compile(

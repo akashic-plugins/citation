@@ -9,13 +9,12 @@ import plugin as citation_module
 from agent.plugins.composable import ComposablePlugin
 from agent.plugins.manager import PluginManager
 from tests.fixtures.plugin_workspace import initialize_plugin_workspace
-from bus.event_bus import EventBus
-from boundary import Reference, TextSource
+from plugins.content.contract import Reference, TextSource
 from plugins.content import plugin as content_module
-from boundary import CONTENT
-from session.log import MessageLog
-from session.message import ContentPart, Output
-from session.message_codec import json_value
+from plugins.content.contract import CONTENT
+from plugins.ledger.log import MessageLog
+from plugins.ledger.contract import ContentPart, Output
+from plugins.ledger.contract import json_value
 
 
 def _copy_ignore():
@@ -105,12 +104,7 @@ async def test_real_manager_content_service_preserves_literals_and_other_protoco
     workspace = tmp_path / "workspace"
     initialize_plugin_workspace(workspace)
     log = MessageLog(workspace / "sessions.db")
-    manager = PluginManager(
-        plugin_dirs=[plugin_home],
-        event_bus=EventBus(),
-        workspace=workspace,
-        message_log=log,
-    )
+    manager = PluginManager(plugin_dirs=[plugin_home], workspace=workspace)
     await manager.load_all()
     root = manager.live_root
     assert root is not None
